@@ -1,0 +1,22 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "line-monitor",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-01",
+  "observability": { "enabled": true },
+  "vars": {
+    // "1" のときだけ定時分析が実際にLINE/Slackへ通知する（試運転中は "0"）
+    "ANALYSIS_NOTIFY": "0"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "line-monitor",
+      "database_id": "45439e14-bd45-48f1-8070-ef2665784754"
+    }
+  ],
+  "triggers": {
+    // 23 UTC = 朝8時JST / 12 UTC = 夜21時JST
+    "crons": ["0 23 * * *", "0 12 * * *"]
+  }
+}
