@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS students (
   teacher_name TEXT,
   trial_start_date TEXT,
   notion_page_id TEXT,
+  target_university TEXT, -- 志望大学学部学科（Notionから同期）
+  monitor_mode TEXT NOT NULL DEFAULT 'daily' CHECK (monitor_mode IN ('daily', 'monthly')), -- monthlyは日報・進捗監視なし
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -79,7 +81,25 @@ CREATE TABLE IF NOT EXISTS alerts (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- ダッシュボード利用者（アクセスキー認証）
+-- AI抽出の学習インサイト（勉強計画・教材進捗・模試結果）。生徒1人につき1行を上書き更新
+CREATE TABLE IF NOT EXISTS student_insights (
+  student_id INTEGER PRIMARY KEY REFERENCES students(id),
+  plan_json TEXT,       -- 教材進捗 [{subject,name,total,done,unit,deadline,note}]
+  exams_json TEXT,      -- 模試結果 [{name,date,scores:[{subject,score,max}],note}]
+  summary TEXT,         -- 勉強計画の1〜2行要約
+  message_count INTEGER, -- 抽出時点の対象メッセージ数（差分再抽出の判定用）
+  extracted_at TEXT
+);
+
+-- 週次のグループLINEよい対応（チューター共有用。点数・順位は持たない）
+CREATE TABLE IF NOT EXISTS weekly_highlights (
+  week_start TEXT PRIMARY KEY,
+  week_end TEXT NOT NULL,
+  items_json TEXT NOT NULL,
+  share_text TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS dashboard_users (
   token TEXT PRIMARY KEY,
   name TEXT NOT NULL,

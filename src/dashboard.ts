@@ -15,8 +15,13 @@ import {
   reportGapThreshold,
   jstDayDiff,
   LESSON_LOOKBACK_DAYS,
+  isMonthlyMonitor,
 } from "./queries";
 import { DASHBOARD_HTML } from "./dashboard-html";
+import { getInsights } from "./insights";
+import { getLatestHighlights } from "./highlights";
+
+type DashStudentRow = StudentRow & { target_university: string | null };
 
 interface DashUser {
   token: string;
@@ -27,6 +32,14 @@ interface DashUser {
 
 const COOKIE_NAME = "dash";
 const CALENDAR_DAYS = 84; // 日報カレンダーの表示期間（12週）
+
+const ALERT_KIND_LABELS: Record<string, string> = {
+  no_report: "日報停止アラート",
+  unanswered_by_student: "生徒側の未返信",
+  unanswered_by_teacher: "未回答の質問",
+  no_lesson: "個別指導未実施",
+  weekly_report_missing: "週次報告未提出",
+};
 
 export async function handleDashboard(request: Request, env: Env, url: URL): Promise<Response> {
   // アクセスキー付きURL → クッキーを設定してキーなしURLへリダイレクト（URL共有時のキー漏れ防止）
@@ -100,6 +113,10 @@ export async function handleDashboard(request: Request, env: Env, url: URL): Pro
     return json({ ok: true });
   }
 
+  if (request.method === "GET" && url.pathname === "/api/highlights") {
+    return json((await getLatestHighlights(env)) ?? { items: [], share_text: "", week_start: null, week_end: null });
+  }
+
   return json({ error: "not found" }, 404);
 }
 
@@ -131,28 +148,28 @@ function unauthorizedPage(): Response {
 
 // ---------- データ組み立て ----------
 
-async function getStudentsForUser(env: Env, user: DashUser): Promise<StudentRow[]> {
+async function getStudentsForUser(env: Env, user: DashUser): Promise<DashStudentRow[]> {
   if (user.role === "teacher") {
     return (
       await env.DB.prepare(
-        `SELECT id, name, business, status, student_group_id, teacher_group_id, teacher_name
+        `SELECT id, name, business, status, student_group_id, teacher_group_id, teacher_name, target_university, monitor_mode
          FROM students WHERE status IN ('trial','enrolled') AND teacher_name = ? ORDER BY name`
-      ).bind(user.teacher_name ?? "").all<StudentRow>()
+      ).bind(user.teacher_name ?? "").all<DashStudentRow>()
     ).results;
   }
   return (
     await env.DB.prepare(
-      `SELECT id, name, business, status, student_group_id, teacher_group_id, teacher_name
+      `SELECT id, name, business, status, student_group_id, teacher_group_id, teacher_name, target_university, monitor_mode
        FROM students WHERE status IN ('trial','enrolled') ORDER BY name`
-    ).all<StudentRow>()
+    ).all<DashStudentRow>()
   ).results;
 }
 
-async function getStudentForUser(env: Env, user: DashUser, id: number): Promise<StudentRow | null> {
+async function getStudentForUser(env: Env, user: DashUser, id: number): Promise<DashStudentRow | null> {
   const s = await env.DB.prepare(
-    `SELECT id, name, business, status, student_group_id, teacher_group_id, teacher_name
+    `SELECT id, name, business, status, student_group_id, teacher_group_id, teacher_name, target_university, monitor_mode
      FROM students WHERE id = ?`
-  ).bind(id).first<StudentRow>();
+  ).bind(id).first<DashStudentRow>();
   if (!s) return null;
   if (user.role === "teacher" && s.teacher_name !== user.teacher_name) return null;
   return s;
@@ -166,18 +183,43 @@ async function buildOverview(env: Env, user: DashUser) {
     const last = await lastStudentSideMessage(env, s);
     const gap = last ? jstDayDiff(new Date(last.sent_at), now) : null;
     const threshold = reportGapThreshold(s.status);
-    const stalled = last ? (gap as number) >= threshold : true;
+    const monthly = isMonthlyMonitor(s);
+    const stalled = monthly ? false : last ? (gap as number) >= threshold : true;
 
-    const lesson = await lessonShareStatus(env, s, now);
+    const lesson = monthly
+      ? { last_lesson_link_at: null as string | null, lesson_share_ok: null as boolean | null }
+      : await lessonShareStatus(env, s, now);
 
-    const openAlerts = await env.DB.prepare(
-      `SELECT COUNT(*) AS n FROM alerts WHERE student_id = ? AND resolved = 0`
-    ).bind(s.id).first<{ n: number }>();
-    const open = openAlerts?.n ?? 0;
+    const openAlertKinds = (
+      await env.DB.prepare(
+        `SELECT kind, COUNT(*) AS n FROM alerts WHERE student_id = ? AND resolved = 0 GROUP BY kind`
+      ).bind(s.id).all<{ kind: string; n: number }>()
+    ).results;
+    const visibleAlertKinds = monthly
+      ? openAlertKinds.filter((k) => k.kind !== "no_report" && k.kind !== "weekly_report_missing" && k.kind !== "no_lesson")
+      : openAlertKinds;
+    const open = visibleAlertKinds.reduce((sum, k) => sum + k.n, 0);
 
     let state: "順調" | "要観察" | "要対応" = "順調";
     if (stalled || open > 0) state = "要対応";
-    else if ((gap !== null && gap === threshold - 1) || lesson.lesson_share_ok === false) state = "要観察";
+    else if (!monthly && ((gap !== null && gap === threshold - 1) || lesson.lesson_share_ok === false)) state = "要観察";
+
+    // 状態の理由（一覧・要対応タブで一目でわかるように）
+    const reasons: string[] = [];
+    if (monthly) {
+      reasons.push("月1面談のため日報監視なし");
+    } else if (!last) {
+      reasons.push("生徒側の発言記録なし");
+    } else if (stalled) {
+      reasons.push(`日報${gap}日停止`);
+    } else if (gap !== null && gap === threshold - 1) {
+      reasons.push(`日報${gap}日経過（明日で停止判定）`);
+    }
+    for (const k of visibleAlertKinds) {
+      if (k.kind === "no_report" && (stalled || !last)) continue;
+      reasons.push(`${ALERT_KIND_LABELS[k.kind] ?? k.kind}${k.n > 1 ? k.n + "件" : ""}が未対応`);
+    }
+    if (lesson.lesson_share_ok === false) reasons.push("個別指導後の共有なし");
 
     items.push({
       id: s.id,
@@ -185,10 +227,13 @@ async function buildOverview(env: Env, user: DashUser) {
       business: s.business,
       status: s.status,
       teacher_name: s.teacher_name,
+      target_university: s.target_university,
+      monitor_mode: monthly ? "monthly" : "daily",
       state,
+      state_reasons: reasons,
       threshold,
       last_report_at: last?.sent_at ?? null,
-      report_gap_days: gap,
+      report_gap_days: monthly ? null : gap,
       open_alerts: open,
       last_lesson_link_at: lesson.last_lesson_link_at,
       lesson_share_ok: lesson.lesson_share_ok,
@@ -198,7 +243,7 @@ async function buildOverview(env: Env, user: DashUser) {
   return { generated_at: now.toISOString(), students: items };
 }
 
-async function buildStudentDetail(env: Env, s: StudentRow) {
+async function buildStudentDetail(env: Env, s: DashStudentRow) {
   const now = new Date();
   const sinceCal = new Date(now.getTime() - CALENDAR_DAYS * 86400_000).toISOString();
 
@@ -232,6 +277,8 @@ async function buildStudentDetail(env: Env, s: StudentRow) {
     ).bind(s.id).all()
   ).results;
 
+  const insights = await getInsights(env, s.id);
+
   return {
     student: {
       id: s.id,
@@ -239,9 +286,12 @@ async function buildStudentDetail(env: Env, s: StudentRow) {
       business: s.business,
       status: s.status,
       teacher_name: s.teacher_name,
+      target_university: s.target_university,
+      monitor_mode: isMonthlyMonitor(s) ? "monthly" : "daily",
       threshold: reportGapThreshold(s.status),
       unmapped: !s.student_group_id,
     },
+    insights,
     calendar_days: CALENDAR_DAYS,
     lesson_lookback_days: LESSON_LOOKBACK_DAYS,
     last_report_at: last?.sent_at ?? null,

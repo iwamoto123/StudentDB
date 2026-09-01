@@ -53,14 +53,17 @@ export const DASHBOARD_HTML = `<!doctype html>
   .state.ok { color: #15803d; border-color: #86efac; background: #f0fdf4; }
   .state.watch { color: #b45309; border-color: var(--accent); background: #fff7ed; }
   .state.action { color: #b91c1c; border-color: #fca5a5; background: #fef2f2; }
+  .state-reason { font-size: 11px; color: #6b7280; margin-top: 3px; line-height: 1.4; max-width: 170px; }
   .muted { color: #9ca3af; }
   .gap-over { color: #b91c1c; font-weight: 600; }
   .box { background: #f9fafb; border-left: 4px solid var(--primary); padding: 12px 14px; margin: 10px 0; font-size: 13px; }
   .backlink { color: var(--primary-dark); cursor: pointer; font-size: 13px; text-decoration: underline; }
-  .cal { display: grid; grid-template-columns: repeat(7, 22px); gap: 3px; }
-  .cal .head { font-size: 10px; color: #6b7280; text-align: center; }
-  .cal .day { width: 22px; height: 22px; background: #e5e7eb; }
-  .cal .day.on { background: var(--primary); }
+  .cal { display: grid; grid-template-columns: repeat(7, 19px); gap: 2px; }
+  .cal .head { font-size: 9px; color: #6b7280; text-align: center; }
+  .cal .day { width: 19px; height: 19px; background: #e5e7eb; font-size: 9px; line-height: 19px; text-align: center; color: #9ca3af; }
+  .cal .day.on { background: var(--primary); color: #fff; }
+  .cal .day.m1 { color: #374151; font-weight: 700; font-size: 8px; letter-spacing: -0.5px; }
+  .cal .day.on.m1 { color: #fff; font-weight: 700; }
   .cal .day.today { outline: 2px solid var(--accent); }
   .legend { font-size: 12px; color: #6b7280; margin-top: 6px; }
   .legend .sw { display: inline-block; width: 12px; height: 12px; vertical-align: -1px; }
@@ -83,6 +86,28 @@ export const DASHBOARD_HTML = `<!doctype html>
   .pager button:disabled { border-color: #d1d5db; color: #9ca3af; cursor: default; }
   .pager .pos { font-size: 13px; color: #4b5563; }
   .pager .keyhint { font-size: 11px; color: #9ca3af; margin-left: auto; }
+  .target { color: var(--primary-dark); font-size: 13px; }
+  .insight-meta { font-size: 11px; color: #9ca3af; margin: -6px 0 10px; }
+  .overall { display: flex; align-items: baseline; gap: 14px; margin: 8px 0 14px; flex-wrap: wrap; }
+  .overall .pct { font-size: 30px; font-weight: 700; color: var(--primary-dark); line-height: 1; }
+  .overall .sub { font-size: 12px; color: #6b7280; }
+  .mat { margin-bottom: 12px; }
+  .mat-head { display: flex; gap: 8px; align-items: baseline; font-size: 13px; flex-wrap: wrap; }
+  .mat-subject { border: 1px solid var(--primary); color: var(--primary-dark); font-size: 11px; padding: 0 6px; white-space: nowrap; }
+  .mat-name { font-weight: 600; }
+  .mat-nums { color: #4b5563; font-size: 12px; }
+  .mat-deadline { font-size: 12px; color: #6b7280; margin-left: auto; white-space: nowrap; }
+  .mat-deadline.over { color: #b91c1c; font-weight: 600; }
+  .bar { height: 12px; background: #e5e7eb; margin-top: 4px; }
+  .bar .fill { height: 100%; background: var(--primary); }
+  .bar .fill.full { background: #16a34a; }
+  .mat-note { font-size: 12px; color: #6b7280; margin-top: 3px; }
+  td.univ { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+  .hl { border: 1px solid #e5e7eb; border-left: 4px solid var(--primary); padding: 12px 14px; margin: 10px 0; }
+  .hl .who { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+  .hl .ex { font-size: 13px; color: #374151; margin: 4px 0; }
+  .hl .why { font-size: 12px; color: #6b7280; margin-top: 6px; }
+  .copybtn { border: 1px solid var(--primary); background: #fff; color: var(--primary-dark); padding: 8px 14px; font-size: 13px; cursor: pointer; font-family: inherit; }
 </style>
 </head>
 <body>
@@ -95,6 +120,7 @@ export const DASHBOARD_HTML = `<!doctype html>
     <button id="tab-students" class="active">生徒一覧</button>
     <button id="tab-action">要対応<span class="badge" id="action-badge" style="display:none"></span></button>
     <button id="tab-alerts">アラート<span class="badge" id="alert-badge" style="display:none"></span></button>
+    <button id="tab-highlights">今週のよい対応</button>
   </nav>
   <div id="content"><div class="loading">読み込み中…</div></div>
 </main>
@@ -105,6 +131,7 @@ export const DASHBOARD_HTML = `<!doctype html>
   var tabS = document.getElementById('tab-students');
   var tabAct = document.getElementById('tab-action');
   var tabA = document.getElementById('tab-alerts');
+  var tabH = document.getElementById('tab-highlights');
   var badge = document.getElementById('alert-badge');
   var actionBadge = document.getElementById('action-badge');
   var overview = null;
@@ -153,6 +180,7 @@ export const DASHBOARD_HTML = `<!doctype html>
     tabS.className = which === 's' ? 'active' : '';
     tabAct.className = which === 'act' ? 'active' : '';
     tabA.className = which === 'a' ? 'active' : '';
+    tabH.className = which === 'h' ? 'active' : '';
     actionMode = which === 'act';
   }
   function setActionBadge(n) {
@@ -222,27 +250,30 @@ export const DASHBOARD_HTML = `<!doctype html>
     var tOpts = [['', '講師: すべて']];
     teachers.forEach(function (t) { tOpts.push([t, t]); });
     html += sel('teacher', tOpts);
-    html += '<input type="search" id="f-q" placeholder="名前で検索" value="' + esc(filters.q) + '">';
+    html += '<input type="search" id="f-q" placeholder="名前・志望校で検索" value="' + esc(filters.q) + '">';
     html += '<span class="count" id="shown-count"></span>';
     html += '<span class="reload" id="reload">最新に更新</span>';
     html += '</div>';
 
-    html += '<div class="tablewrap"><table><thead><tr><th>状態</th><th>名前</th><th>事業</th><th>在籍</th><th>担当講師</th><th>最終日報</th><th>経過</th><th>未対応</th><th>指導後共有</th></tr></thead><tbody>';
+    html += '<div class="tablewrap"><table><thead><tr><th>状態</th><th>名前</th><th>志望校</th><th>事業</th><th>在籍</th><th>担当講師</th><th>最終日報</th><th>経過</th><th>未対応</th><th>指導後共有</th></tr></thead><tbody>';
     var shown = 0;
     items.forEach(function (s) {
       if (filters.business && s.business !== filters.business) return;
       if (filters.teacher && s.teacher_name !== filters.teacher) return;
       if (filters.state && s.state !== filters.state) return;
       if (filters.onlyAlerts && !(s.open_alerts > 0)) return;
-      if (filters.q && String(s.name).indexOf(filters.q) < 0) return;
+      if (filters.q && String(s.name).indexOf(filters.q) < 0 && String(s.target_university || '').indexOf(filters.q) < 0) return;
       shown++;
       var share = s.lesson_share_ok === true ? 'あり' : s.lesson_share_ok === false ? '<span class="state watch">なし</span>' : '<span class="muted">-</span>';
       var over = s.report_gap_days != null && s.report_gap_days >= (s.threshold || 3);
+      var reasons = (s.state_reasons && s.state_reasons.length && s.state !== '順調')
+        ? '<div class="state-reason">' + esc(s.state_reasons.join('・')) + '</div>' : '';
       html += '<tr class="clickable" data-id="' + s.id + '">'
-        + '<td><span class="state ' + STATE_CLASS[s.state] + '">' + s.state + '</span></td>'
+        + '<td><span class="state ' + STATE_CLASS[s.state] + '">' + s.state + '</span>' + reasons + '</td>'
         + '<td>' + esc(s.name) + (s.unmapped ? ' <span class="muted">(グループ未紐付け)</span>' : '') + '</td>'
+        + '<td class="univ" title="' + esc(s.target_university || '') + '">' + (s.target_university ? esc(s.target_university) : '<span class="muted">-</span>') + '</td>'
         + '<td>' + (BIZ[s.business] || s.business) + '</td>'
-        + '<td>' + (STATUS[s.status] || s.status) + '</td>'
+        + '<td>' + (STATUS[s.status] || s.status) + (s.monitor_mode === 'monthly' ? ' <span class="mat-subject">月1面談</span>' : '') + '</td>'
         + '<td>' + esc(s.teacher_name || '-') + '</td>'
         + '<td>' + (s.last_report_at ? jstDate(s.last_report_at) : '<span class="muted">記録なし</span>') + '</td>'
         + '<td' + (over ? ' class="gap-over"' : '') + '>' + (s.report_gap_days == null ? '-' : s.report_gap_days + '日') + '</td>'
@@ -350,15 +381,23 @@ export const DASHBOARD_HTML = `<!doctype html>
         + '<button id="pg-next"' + (actionIdx === actionList.length - 1 ? ' disabled' : '') + '>次へ →</button>'
         + '<span class="keyhint">キーボードの ← → でもめくれます</span>'
         + '</div>';
+      var ar = actionList[actionIdx].state_reasons;
+      if (ar && ar.length) {
+        html += '<div class="box" style="border-left-color:#dc2626"><strong>対応が必要な理由:</strong> ' + esc(ar.join('・')) + '</div>';
+      }
     } else {
       html = '<span class="backlink" id="back">← 生徒一覧へ戻る</span>';
     }
     html += '<h2>' + esc(s.name) + 'さん</h2>';
     html += '<div class="box">'
+      + (s.target_university ? '<div class="target">志望: ' + esc(s.target_university) + '</div>' : '')
       + (BIZ[s.business] || s.business) + ' / ' + (STATUS[s.status] || s.status)
+      + (s.monitor_mode === 'monthly' ? ' / 月1面談（日報監視なし）' : '')
       + ' / 担当: ' + esc(s.teacher_name || '未設定')
       + ' / 最終日報: ' + (d.last_report_at ? jstDateTime(d.last_report_at) : '記録なし')
       + '（停止判定は' + s.threshold + '日）</div>';
+
+    html += renderInsights(d.insights);
 
     html += '<div class="detail-grid"><div>';
 
@@ -417,6 +456,64 @@ export const DASHBOARD_HTML = `<!doctype html>
     bindResolve();
   }
 
+  // 勉強計画・教材進捗・模試（AI抽出）の描画
+  function renderInsights(ins) {
+    var html = '<h2>勉強計画と進捗</h2>';
+    var hasPlan = ins && (ins.materials.length > 0 || ins.summary);
+    if (!hasPlan) {
+      html += '<p class="muted">会話履歴から勉強計画をまだ抽出できていません。</p>';
+    } else {
+      if (ins.extracted_at) {
+        html += '<p class="insight-meta">会話履歴からAIが自動抽出しています（最終更新: ' + jstDateTime(sqlTime(ins.extracted_at)) + '・毎朝更新）</p>';
+      }
+      if (ins.summary) html += '<div class="box">' + esc(ins.summary) + '</div>';
+
+      var withNums = ins.materials.filter(function (m) { return m.total > 0 && m.done != null; });
+      if (withNums.length > 0) {
+        var sumPct = 0;
+        withNums.forEach(function (m) { sumPct += Math.min(m.done / m.total, 1); });
+        var overall = Math.round((sumPct / withNums.length) * 100);
+        html += '<div class="overall"><span class="pct">' + overall + '%</span>'
+          + '<span class="sub">全体達成率（進捗が数値でわかる教材' + withNums.length + '件の平均）</span></div>';
+      }
+
+      var today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
+      ins.materials.forEach(function (m) {
+        var pct = (m.total > 0 && m.done != null) ? Math.min(Math.round((m.done / m.total) * 100), 100) : null;
+        var over = m.deadline && m.deadline < today && (pct == null || pct < 100);
+        html += '<div class="mat"><div class="mat-head">'
+          + (m.subject ? '<span class="mat-subject">' + esc(m.subject) + '</span>' : '')
+          + '<span class="mat-name">' + esc(m.name) + '</span>'
+          + (pct != null ? '<span class="mat-nums">' + m.done + ' / ' + m.total + esc(m.unit || '') + '（' + pct + '%）</span>' : '')
+          + (m.deadline ? '<span class="mat-deadline' + (over ? ' over' : '') + '">締切 ' + esc(m.deadline) + (over ? ' 超過' : '') + '</span>' : '')
+          + '</div>';
+        if (pct != null) {
+          html += '<div class="bar"><div class="fill' + (pct >= 100 ? ' full' : '') + '" style="width:' + pct + '%"></div></div>';
+        }
+        if (m.note) html += '<div class="mat-note">' + esc(m.note) + '</div>';
+        html += '</div>';
+      });
+    }
+
+    html += '<h2>模試の結果</h2>';
+    if (!ins || ins.exams.length === 0) {
+      html += '<p class="muted">会話履歴に模試の点数報告が見つかっていません。</p>';
+    } else {
+      var exams = ins.exams.slice().sort(function (a, b) { return String(b.date || '') < String(a.date || '') ? -1 : 1; });
+      html += '<div class="tablewrap"><table><thead><tr><th>日付</th><th>模試</th><th>点数</th><th>メモ</th></tr></thead><tbody>';
+      exams.forEach(function (e) {
+        var scores = (e.scores || []).map(function (sc) {
+          return esc(sc.subject) + ' ' + sc.score + (sc.max ? '/' + sc.max : '');
+        }).join('、');
+        html += '<tr><td style="white-space:nowrap">' + (e.date ? esc(e.date) : '-') + '</td>'
+          + '<td>' + esc(e.name) + '</td><td>' + scores + '</td>'
+          + '<td style="font-size:12px;color:#4b5563">' + esc(e.note || '') + '</td></tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    return html;
+  }
+
   function renderCalendar(reportDays) {
     var set = {};
     reportDays.forEach(function (r) { set[r.day] = r.count; });
@@ -433,8 +530,11 @@ export const DASHBOARD_HTML = `<!doctype html>
     ['月', '火', '水', '木', '金', '土', '日'].forEach(function (w) { html += '<div class="head">' + w + '</div>'; });
     for (var p = 0; p < firstDow; p++) html += '<div></div>';
     days.forEach(function (day) {
-      var cls = 'day' + (set[day] ? ' on' : '') + (day === today ? ' today' : '');
-      html += '<div class="' + cls + '" title="' + day + (set[day] ? '（' + set[day] + '件）' : '') + '"></div>';
+      var num = Number(day.slice(8));
+      // 1日は月の切り替わりがわかるように濃く表示。数字は日付
+      var cls = 'day' + (set[day] ? ' on' : '') + (day === today ? ' today' : '') + (num === 1 ? ' m1' : '');
+      var label = num === 1 ? Number(day.slice(5, 7)) + '/1' : num;
+      html += '<div class="' + cls + '" title="' + day + (set[day] ? '（' + set[day] + '件）' : '') + '">' + label + '</div>';
     });
     return html + '</div>';
   }
@@ -496,6 +596,38 @@ export const DASHBOARD_HTML = `<!doctype html>
     });
   }
 
+  function showHighlights() {
+    setTab('h');
+    content.innerHTML = '<div class="loading">読み込み中…</div>';
+    api('/api/highlights').then(function (h) {
+      var html = '<h2>今週のグループLINEで熱意が伝わった対応</h2>';
+      html += '<p class="hint">個別指導ではなく、グループLINEでの質問・報告への返しです。点数や順位はありません。下の文面をコピーしてチューターにシェアできます。</p>';
+      if (!h || !h.items || h.items.length === 0) {
+        html += '<p class="muted">まだリストがありません。月曜の朝に自動で作られます。</p>';
+        content.innerHTML = html;
+        return;
+      }
+      var range = (h.week_start || '') + ' 〜 ' + (h.week_end || '');
+      html += '<div class="box">対象期間: ' + esc(range) + (h.created_at ? '　作成: ' + jstDateTime(sqlTime(h.created_at)) : '') + '</div>';
+      html += '<p><button class="copybtn" id="copy-hl">シェア用テキストをコピー</button></p>';
+      h.items.forEach(function (it, i) {
+        html += '<div class="hl"><div class="who">' + (i + 1) + '. ' + esc(it.tutor) + ' → ' + esc(it.student) + 'さん（' + esc(it.date) + '）</div>'
+          + '<div class="ex">生徒: ' + esc(it.student_excerpt) + '</div>'
+          + '<div class="ex">対応: ' + esc(it.reply_excerpt) + '</div>'
+          + '<div class="why">よかった点: ' + esc(it.why) + '</div></div>';
+      });
+      content.innerHTML = html;
+      document.getElementById('copy-hl').onclick = function () {
+        var text = h.share_text || '';
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(function () { toast('コピーしました'); }).catch(function () { toast('コピーに失敗しました', true); });
+        } else {
+          toast('このブラウザではコピーできません。Slackの投稿を使ってください', true);
+        }
+      };
+    }).catch(showError);
+  }
+
   function showError(e) {
     content.innerHTML = '<p class="muted">読み込みに失敗しました: ' + esc(e.message) + '</p>';
   }
@@ -506,6 +638,7 @@ export const DASHBOARD_HTML = `<!doctype html>
   };
   tabAct.onclick = showAction;
   tabA.onclick = showAlerts;
+  tabH.onclick = showHighlights;
   api('/api/me').then(function (me) {
     document.getElementById('user').textContent =
       me.name + (me.role === 'teacher' ? '（担当生徒のみ表示）' : '（全生徒表示）');

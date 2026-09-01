@@ -10,8 +10,11 @@
 
 import { parseLineExport, importMessageId } from "./importer";
 import { sendToGroup } from "./send";
-import { runAnalysis } from "./analyzer";
+import { runAnalysis, runUnansweredSweep } from "./analyzer";
 import { handleDashboard } from "./dashboard";
+import { extractStudentInsights, refreshAllInsights } from "./insights";
+import { runWeeklyHighlights } from "./highlights";
+import type { StudentRow } from "./queries";
 import type { Env } from "./types";
 
 export type { Env };
@@ -71,10 +74,8 @@ export default {
   // 定時分析（1日2回: 23 UTC = 朝8時JST / 12 UTC = 夜21時JST）
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     const isMorning = controller.cron === "0 23 * * *";
-    // 週次報告チェックは月曜朝のみ（JSTの曜日で判定）
     const jstDay = new Date(controller.scheduledTime + 9 * 3600_000).getUTCDay();
     const weekly = isMorning && jstDay === 1;
-    // 通知はANALYSIS_NOTIFY="1"のときのみ。オフの間は分析だけ実行してログに残す（試運転モード）
     const notify = env.ANALYSIS_NOTIFY === "1";
     ctx.waitUntil(
       runAnalysis(env, { notify, weekly }).then(
@@ -82,6 +83,22 @@ export default {
         (e) => console.error("analysis failed", e)
       )
     );
+    if (isMorning) {
+      ctx.waitUntil(
+        refreshAllInsights(env).then(
+          (rs) => console.log(`insights refreshed: ${rs.filter((r) => r.status === "ok").length}/${rs.length}`),
+          (e) => console.error("insights refresh failed", e)
+        )
+      );
+      if (weekly) {
+        ctx.waitUntil(
+          runWeeklyHighlights(env, { notify }).then(
+            (r) => console.log(`weekly highlights: count=${r.count} slack=${r.slack?.ok}`),
+            (e) => console.error("weekly highlights failed", e)
+          )
+        );
+      }
+    }
   },
 } satisfies ExportedHandler<Env>;
 
@@ -300,13 +317,16 @@ async function handleAdmin(request: Request, env: Env, url: URL): Promise<Respon
     const b = (await request.json()) as {
       name?: string; business?: string; status?: string;
       student_group_id?: string; teacher_group_id?: string; teacher_name?: string;
-      trial_start_date?: string; notion_page_id?: string;
+      trial_start_date?: string; notion_page_id?: string; target_university?: string; monitor_mode?: string;
     };
     if (!b.name || !b.business || !["shiratani", "localmedi"].includes(b.business)) {
       return json({ error: "name and business (shiratani|localmedi) required" }, 400);
     }
     if (b.status && !["trial", "enrolled", "inactive"].includes(b.status)) {
       return json({ error: "status must be trial|enrolled|inactive" }, 400);
+    }
+    if (b.monitor_mode && !["daily", "monthly"].includes(b.monitor_mode)) {
+      return json({ error: "monitor_mode must be daily|monthly" }, 400);
     }
 
     // 紐付け先グループの存在チェック（FK違反を先にわかりやすいエラーで返す）
@@ -331,18 +351,22 @@ async function handleAdmin(request: Request, env: Env, url: URL): Promise<Respon
            teacher_name = COALESCE(?, teacher_name),
            trial_start_date = COALESCE(?, trial_start_date),
            notion_page_id = COALESCE(?, notion_page_id),
+           target_university = COALESCE(?, target_university),
+           monitor_mode = COALESCE(?, monitor_mode),
            updated_at = datetime('now')
          WHERE id = ?`
       ).bind(b.name, b.business, b.status ?? null, b.student_group_id ?? null, b.teacher_group_id ?? null,
-             b.teacher_name ?? null, b.trial_start_date ?? null, b.notion_page_id ?? null, existing.id).run();
+             b.teacher_name ?? null, b.trial_start_date ?? null, b.notion_page_id ?? null,
+             b.target_university ?? null, b.monitor_mode ?? null, existing.id).run();
       return json({ ok: true, id: existing.id, action: "updated" });
     }
 
     const r = await env.DB.prepare(
-      `INSERT INTO students (name, business, status, student_group_id, teacher_group_id, teacher_name, trial_start_date, notion_page_id)
-       VALUES (?, ?, COALESCE(?, 'trial'), ?, ?, ?, ?, ?)`
+      `INSERT INTO students (name, business, status, student_group_id, teacher_group_id, teacher_name, trial_start_date, notion_page_id, target_university, monitor_mode)
+       VALUES (?, ?, COALESCE(?, 'trial'), ?, ?, ?, ?, ?, ?, COALESCE(?, 'daily'))`
     ).bind(b.name, b.business, b.status ?? null, b.student_group_id ?? null, b.teacher_group_id ?? null,
-           b.teacher_name ?? null, b.trial_start_date ?? null, b.notion_page_id ?? null).run();
+           b.teacher_name ?? null, b.trial_start_date ?? null, b.notion_page_id ?? null,
+           b.target_university ?? null, b.monitor_mode ?? null).run();
     return json({ ok: true, id: r.meta.last_row_id, action: "inserted" });
   }
 
@@ -390,9 +414,33 @@ async function handleAdmin(request: Request, env: Env, url: URL): Promise<Respon
     return json({ ok: true, deactivated: r.meta.changes });
   }
 
-  // 分析の手動実行。デフォルトはdry-run（通知なしで結果だけ返す）。notify=1 で実際に通知する
+  // 学習インサイトの手動抽出。student_id指定で1人、なしで全員（force=1で全員強制再抽出）
+  if (request.method === "POST" && url.pathname === "/admin/extract-insights") {
+    const studentId = Number(url.searchParams.get("student_id") ?? 0);
+    if (studentId) {
+      const s = await env.DB.prepare(
+        `SELECT id, name, business, status, student_group_id, teacher_group_id, teacher_name
+         FROM students WHERE id = ?`
+      ).bind(studentId).first<StudentRow>();
+      if (!s) return json({ error: "student not found" }, 404);
+      return json(await extractStudentInsights(env, s));
+    }
+    const force = url.searchParams.get("force") === "1";
+    return json(await refreshAllInsights(env, { force }));
+  }
+
+  // 今週のよい対応リストを作り直す。notify=1 でSlackにも送る
+  if (request.method === "POST" && url.pathname === "/admin/weekly-highlights") {
+    const notify = url.searchParams.get("notify") === "1";
+    return json(await runWeeklyHighlights(env, { notify }));
+  }
+
+  // 分析の手動実行。デフォルトはdry-run。notify=1 で実際に通知。sweep=1 は未回答質問だけ
   if (request.method === "POST" && url.pathname === "/admin/run-analysis") {
     const notify = url.searchParams.get("notify") === "1";
+    if (url.searchParams.get("sweep") === "1") {
+      return json(await runUnansweredSweep(env, { notify }));
+    }
     const weekly = url.searchParams.get("weekly") === "1";
     const result = await runAnalysis(env, { notify, weekly });
     return json(result);

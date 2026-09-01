@@ -17,6 +17,12 @@ export interface StudentRow {
   student_group_id: string | null;
   teacher_group_id: string | null;
   teacher_name: string | null;
+  /** daily（既定）= 日報監視する / monthly = 月1面談などで日報・進捗を見ない */
+  monitor_mode?: string | null;
+}
+
+export function isMonthlyMonitor(s: { monitor_mode?: string | null }): boolean {
+  return s.monitor_mode === "monthly";
 }
 
 /** 生徒側の発言に絞るWHERE句（display_name参照）とバインド値 */

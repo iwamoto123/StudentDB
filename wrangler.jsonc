@@ -5,8 +5,8 @@
   "compatibility_date": "2026-05-01",
   "observability": { "enabled": true },
   "vars": {
-    // "1" のときだけ定時分析が実際にLINE/Slackへ通知する（試運転中は "0"）
-    "ANALYSIS_NOTIFY": "0"
+    // "1" のときだけ定時分析が実際にLINE/Slackへ通知する
+    "ANALYSIS_NOTIFY": "1"
   },
   "d1_databases": [
     {

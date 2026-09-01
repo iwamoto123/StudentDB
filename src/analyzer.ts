@@ -18,15 +18,19 @@ import {
   lessonShareStatus,
   reportGapThreshold,
   jstDayDiff,
+  isMonthlyMonitor,
   LESSON_LOOKBACK_DAYS,
 } from "./queries";
 
 const JST_MS = 9 * 3600_000;
 const DEFAULT_MODEL = "claude-haiku-4-5";
-// 同じ生徒×同じ種別のアラートを再通知しない時間（時）。1日2回の実行で朝晩二重に催促しない
+// 日報停止などの再通知間隔（時）。朝晩の定時で二重に催促しない
 const ALERT_COOLDOWN_HOURS = 20;
-// 未回答検出の対象期間（時）。24時間以内の回答を徹底したいので24時間
+// 未回答検出の対象期間（時）
 const UNANSWERED_WINDOW_HOURS = 24;
+const UNANSWERED_SWEEP_WINDOW_HOURS = 24;
+// 生徒・保護者の質問に講師が答えていないとみなす時間（時）
+const STUDENT_QUESTION_STALE_HOURS = 12;
 
 export interface UnansweredItem {
   direction: "student_to_staff" | "staff_to_student";
@@ -47,8 +51,9 @@ export interface StudentAnalysis {
   ai_analyzed: boolean;
   /** 直近の個別指導リンク（Zoom/Google Meet）の投稿日時。直近14日でなければnull */
   last_lesson_link_at: string | null;
-  /** 指導後の共有投稿があるか。null = 判定対象外（リンクなし or 実施直後で共有待ち） */
+  /** 指導後の共有投稿があるか。null = 判定対象外（リンクなし or 実施直後で共有待ち or 月1面談） */
   lesson_share_ok: boolean | null;
+  skip_progress: boolean;
   notes: string[];
 }
 
@@ -70,7 +75,7 @@ export async function runAnalysis(
   const now = new Date();
   const students = (
     await env.DB.prepare(
-      `SELECT id, name, business, status, student_group_id, teacher_group_id, teacher_name
+      `SELECT id, name, business, status, student_group_id, teacher_group_id, teacher_name, monitor_mode
        FROM students WHERE status IN ('trial', 'enrolled') ORDER BY name`
     ).all<StudentRow>()
   ).results;
@@ -108,11 +113,7 @@ export async function runAnalysis(
 
       const byTeacher = a.unanswered.filter((u) => u.direction === "student_to_staff");
       if (byTeacher.length > 0) {
-        const lines = byTeacher.map((u) => `・${u.asked_at} ${u.asked_by}さん「${u.question}」`).join("\n");
-        const text =
-          `【対応依頼】${a.name}さんのグループに未回答の質問があります。\n${lines}\n` +
-          `ご回答をお願いします。\n\n※学習進捗サポートの自動通知です`;
-        await notifyOnce(env, student, "unanswered_by_teacher", text, sentAlerts);
+        await notifyUnansweredByTeacher(env, student, byTeacher, sentAlerts);
       }
     }
   }
@@ -133,6 +134,52 @@ export async function runAnalysis(
   };
 }
 
+/**
+ * 毎時の未回答チェック。生徒・保護者の質問に1時間以上答えていない場合だけ講師グループへ送る。
+ * Slackダイジェストは送らない（朝晩の定時に任せる）。
+ */
+export async function runUnansweredSweep(
+  env: Env,
+  opts: { notify: boolean }
+): Promise<{ checked: number; unanswered: number; sent_alerts: AnalysisResult["sent_alerts"] }> {
+  const now = new Date();
+  const students = (
+    await env.DB.prepare(
+      `SELECT id, name, business, status, student_group_id, teacher_group_id, teacher_name, monitor_mode
+       FROM students WHERE status IN ('trial', 'enrolled') AND student_group_id IS NOT NULL
+       ORDER BY name`
+    ).all<StudentRow>()
+  ).results;
+
+  const sentAlerts: AnalysisResult["sent_alerts"] = [];
+  let unanswered = 0;
+  const windowStart = new Date(now.getTime() - UNANSWERED_SWEEP_WINDOW_HOURS * 3600_000).toISOString();
+
+  for (const s of students) {
+    if (!s.student_group_id) continue;
+    const recent = (
+      await env.DB.prepare(
+        `SELECT sent_at, display_name, message_type, text FROM messages
+         WHERE group_id = ? AND sent_at >= ? AND message_type <> 'system'
+         ORDER BY sent_at ASC LIMIT 120`
+      ).bind(s.student_group_id, windowStart).all<{
+        sent_at: string; display_name: string | null; message_type: string; text: string | null;
+      }>()
+    ).results;
+    if (recent.length === 0) continue;
+
+    const detected = await detectUnanswered(env, s, recent, now);
+    const byTeacher = (detected ?? []).filter((u) => u.direction === "student_to_staff");
+    if (byTeacher.length === 0) continue;
+    unanswered++;
+    if (opts.notify && s.teacher_group_id) {
+      await notifyUnansweredByTeacher(env, s, byTeacher, sentAlerts);
+    }
+  }
+
+  return { checked: students.length, unanswered, sent_alerts: sentAlerts };
+}
+
 // ---------- 生徒1人分の分析 ----------
 
 async function analyzeStudent(env: Env, s: StudentRow, now: Date): Promise<StudentAnalysis> {
@@ -148,6 +195,7 @@ async function analyzeStudent(env: Env, s: StudentRow, now: Date): Promise<Stude
     ai_analyzed: false,
     last_lesson_link_at: null,
     lesson_share_ok: null,
+    skip_progress: isMonthlyMonitor(s),
     notes: [],
   };
 
@@ -157,22 +205,27 @@ async function analyzeStudent(env: Env, s: StudentRow, now: Date): Promise<Stude
   }
 
   // F2-1: 生徒側（スタッフ・講師以外）の最終発言（判定ロジックはqueries.tsに集約）
-  const last = await lastStudentSideMessage(env, s);
-  const threshold = reportGapThreshold(s.status);
-  if (last) {
-    a.last_student_message_at = last.sent_at;
-    a.report_gap_days = jstDayDiff(new Date(last.sent_at), now);
-    a.report_stalled = a.report_gap_days >= threshold;
+  // 月1面談の生徒は日報・進捗を見ない
+  if (isMonthlyMonitor(s)) {
+    a.notes.push("月1面談のため日報監視なし");
   } else {
-    a.report_gap_days = null;
-    a.report_stalled = true;
-    a.notes.push("生徒側の発言が1件もありません");
-  }
+    const last = await lastStudentSideMessage(env, s);
+    const threshold = reportGapThreshold(s.status);
+    if (last) {
+      a.last_student_message_at = last.sent_at;
+      a.report_gap_days = jstDayDiff(new Date(last.sent_at), now);
+      a.report_stalled = a.report_gap_days >= threshold;
+    } else {
+      a.report_gap_days = null;
+      a.report_stalled = true;
+      a.notes.push("生徒側の発言が1件もありません");
+    }
 
-  // F2-5: 個別指導後の共有チェック（queries.tsに集約）
-  const lesson = await lessonShareStatus(env, s, now);
-  a.last_lesson_link_at = lesson.last_lesson_link_at;
-  a.lesson_share_ok = lesson.lesson_share_ok;
+    // F2-5: 個別指導後の共有チェック（queries.tsに集約）
+    const lesson = await lessonShareStatus(env, s, now);
+    a.last_lesson_link_at = lesson.last_lesson_link_at;
+    a.lesson_share_ok = lesson.lesson_share_ok;
+  }
 
   // F2-2: 未回答検出（Claude）。対象期間に会話がなければスキップ
   const windowStart = new Date(now.getTime() - UNANSWERED_WINDOW_HOURS * 3600_000).toISOString();
@@ -222,8 +275,8 @@ async function detectUnanswered(
 現在時刻: ${jstShort(now.toISOString(), true)}
 
 未回答の質問・依頼を検出してください。
+- direction="student_to_staff": 生徒・保護者からの質問・依頼・確認待ちに、講師・スタッフが${STUDENT_QUESTION_STALE_HOURS}時間以上応答していない
 - direction="staff_to_student": 講師・スタッフからの質問や依頼に、生徒・保護者が12時間以上応答していない
-- direction="student_to_staff": 生徒・保護者からの質問に、講師・スタッフが6時間以上応答していない
 - 挨拶・報告・スタンプなど応答不要のものは含めない
 - 質問の後に話題が変わっていても、実質的に答えられていれば未回答としない
 - 判断に迷うものは含めない（誤検知より見逃しのほうがまし）
@@ -278,6 +331,7 @@ async function checkWeeklyReports(
 
   for (const s of students) {
     if (!s.teacher_group_id) continue;
+    if (isMonthlyMonitor(s)) continue;
     // 週次報告は1行目が【生徒名】で始まる。名前の表記ゆれに備えてフルネームと下2文字の両方で探す
     const nameTail = s.name.slice(-2);
     const found = await env.DB.prepare(
@@ -295,18 +349,32 @@ async function checkWeeklyReports(
 
 // ---------- 通知（重複抑止つき） ----------
 
+async function notifyUnansweredByTeacher(
+  env: Env,
+  student: StudentRow,
+  items: UnansweredItem[],
+  sentAlerts: AnalysisResult["sent_alerts"]
+): Promise<void> {
+  const lines = items.map((u) => `・${u.asked_at} ${u.asked_by}さん「${u.question}」`).join("\n");
+  const text =
+    `【対応依頼】${student.name}さんのグループに未回答の質問があります。\n${lines}\n` +
+    `ご回答をお願いします。\n\n※学習進捗サポートの自動通知です`;
+  await notifyOnce(env, student, "unanswered_by_teacher", text, sentAlerts);
+}
+
 async function notifyOnce(
   env: Env,
   student: StudentRow,
   kind: string,
   text: string,
-  sentAlerts: AnalysisResult["sent_alerts"]
+  sentAlerts: AnalysisResult["sent_alerts"],
+  cooldownHours = ALERT_COOLDOWN_HOURS
 ): Promise<void> {
   const recent = await env.DB.prepare(
     `SELECT 1 FROM alerts
      WHERE student_id = ? AND kind = ? AND created_at >= datetime('now', ?)
      LIMIT 1`
-  ).bind(student.id, kind, `-${ALERT_COOLDOWN_HOURS} hours`).first();
+  ).bind(student.id, kind, `-${cooldownHours} hours`).first();
   if (recent) return;
 
   const result = await sendToGroup(env, student.teacher_group_id!, `alert_${kind}`, text);
@@ -334,8 +402,8 @@ function buildDigest(
 ): string {
   const stalled = analyses.filter((a) => a.report_stalled);
   const withUnanswered = analyses.filter((a) => a.unanswered.length > 0);
-  const noShare = analyses.filter((a) => a.lesson_share_ok === false);
-  const noLessonLink = analyses.filter((a) => a.last_lesson_link_at === null);
+  const noShare = analyses.filter((a) => !a.skip_progress && a.lesson_share_ok === false);
+  const noLessonLink = analyses.filter((a) => !a.skip_progress && a.last_lesson_link_at === null);
   const ok = analyses.filter((a) => !a.report_stalled && a.unanswered.length === 0);
 
   const L: string[] = [];
