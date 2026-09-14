@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS students (
   trial_start_date TEXT,
   notion_page_id TEXT,
   target_university TEXT, -- 志望大学学部学科（Notionから同期）
-  monitor_mode TEXT NOT NULL DEFAULT 'daily' CHECK (monitor_mode IN ('daily', 'monthly')), -- monthlyは日報・進捗監視なし
+  monitor_mode TEXT NOT NULL DEFAULT 'daily' CHECK (monitor_mode IN ('daily', 'monthly', 'no_progress', 'skip')), -- monthlyは月1面談 / no_progressは進捗管理なし / skipはLINE未参加
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

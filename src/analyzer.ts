@@ -18,7 +18,9 @@ import {
   lessonShareStatus,
   reportGapThreshold,
   jstDayDiff,
-  isMonthlyMonitor,
+  skipsDailyReport,
+  skipProgressReason,
+  skipsAllMonitoring,
   LESSON_LOOKBACK_DAYS,
 } from "./queries";
 
@@ -51,7 +53,7 @@ export interface StudentAnalysis {
   ai_analyzed: boolean;
   /** 直近の個別指導リンク（Zoom/Google Meet）の投稿日時。直近14日でなければnull */
   last_lesson_link_at: string | null;
-  /** 指導後の共有投稿があるか。null = 判定対象外（リンクなし or 実施直後で共有待ち or 月1面談） */
+  /** 指導後の共有投稿があるか。null = 判定対象外（リンクなし or 実施直後で共有待ち or 日報監視なし） */
   lesson_share_ok: boolean | null;
   skip_progress: boolean;
   notes: string[];
@@ -156,7 +158,7 @@ export async function runUnansweredSweep(
   const windowStart = new Date(now.getTime() - UNANSWERED_SWEEP_WINDOW_HOURS * 3600_000).toISOString();
 
   for (const s of students) {
-    if (!s.student_group_id) continue;
+    if (!s.student_group_id || skipsAllMonitoring(s)) continue;
     const recent = (
       await env.DB.prepare(
         `SELECT sent_at, display_name, message_type, text FROM messages
@@ -195,19 +197,19 @@ async function analyzeStudent(env: Env, s: StudentRow, now: Date): Promise<Stude
     ai_analyzed: false,
     last_lesson_link_at: null,
     lesson_share_ok: null,
-    skip_progress: isMonthlyMonitor(s),
+    skip_progress: skipsDailyReport(s),
     notes: [],
   };
 
-  if (!s.student_group_id) {
-    a.notes.push("生徒グループ未紐付け");
+  if (skipsAllMonitoring(s) || !s.student_group_id) {
+    a.notes.push(skipsAllMonitoring(s) ? "LINE未参加のため監視対象外" : "生徒グループ未紐付け");
     return a;
   }
 
   // F2-1: 生徒側（スタッフ・講師以外）の最終発言（判定ロジックはqueries.tsに集約）
-  // 月1面談の生徒は日報・進捗を見ない
-  if (isMonthlyMonitor(s)) {
-    a.notes.push("月1面談のため日報監視なし");
+  // 月1面談・進捗管理なしの生徒は日報・進捗を見ない
+  if (skipsDailyReport(s)) {
+    a.notes.push(skipProgressReason(s) ?? "日報監視なし");
   } else {
     const last = await lastStudentSideMessage(env, s);
     const threshold = reportGapThreshold(s.status);
@@ -331,7 +333,7 @@ async function checkWeeklyReports(
 
   for (const s of students) {
     if (!s.teacher_group_id) continue;
-    if (isMonthlyMonitor(s)) continue;
+    if (skipsDailyReport(s)) continue;
     // 週次報告は1行目が【生徒名】で始まる。名前の表記ゆれに備えてフルネームと下2文字の両方で探す
     const nameTail = s.name.slice(-2);
     const found = await env.DB.prepare(

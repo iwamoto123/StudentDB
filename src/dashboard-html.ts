@@ -101,7 +101,8 @@ export const DASHBOARD_HTML = `<!doctype html>
   .bar { height: 12px; background: #e5e7eb; margin-top: 4px; }
   .bar .fill { height: 100%; background: var(--primary); }
   .bar .fill.full { background: #16a34a; }
-  .mat-note { font-size: 12px; color: #6b7280; margin-top: 3px; }
+  .mat.done { opacity: .72; }
+  .mat-done { border: 1px solid #86efac; color: #15803d; font-size: 11px; padding: 0 6px; white-space: nowrap; }
   td.univ { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
   .hl { border: 1px solid #e5e7eb; border-left: 4px solid var(--primary); padding: 12px 14px; margin: 10px 0; }
   .hl .who { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
@@ -273,7 +274,11 @@ export const DASHBOARD_HTML = `<!doctype html>
         + '<td>' + esc(s.name) + (s.unmapped ? ' <span class="muted">(グループ未紐付け)</span>' : '') + '</td>'
         + '<td class="univ" title="' + esc(s.target_university || '') + '">' + (s.target_university ? esc(s.target_university) : '<span class="muted">-</span>') + '</td>'
         + '<td>' + (BIZ[s.business] || s.business) + '</td>'
-        + '<td>' + (STATUS[s.status] || s.status) + (s.monitor_mode === 'monthly' ? ' <span class="mat-subject">月1面談</span>' : '') + '</td>'
+        + '<td>' + (STATUS[s.status] || s.status)
+        + (s.monitor_mode === 'monthly' ? ' <span class="mat-subject">月1面談</span>' : '')
+        + (s.monitor_mode === 'no_progress' ? ' <span class="mat-subject">進捗管理なし</span>' : '')
+        + (s.monitor_mode === 'skip' ? ' <span class="mat-subject">監視対象外</span>' : '')
+        + '</td>'
         + '<td>' + esc(s.teacher_name || '-') + '</td>'
         + '<td>' + (s.last_report_at ? jstDate(s.last_report_at) : '<span class="muted">記録なし</span>') + '</td>'
         + '<td' + (over ? ' class="gap-over"' : '') + '>' + (s.report_gap_days == null ? '-' : s.report_gap_days + '日') + '</td>'
@@ -393,6 +398,8 @@ export const DASHBOARD_HTML = `<!doctype html>
       + (s.target_university ? '<div class="target">志望: ' + esc(s.target_university) + '</div>' : '')
       + (BIZ[s.business] || s.business) + ' / ' + (STATUS[s.status] || s.status)
       + (s.monitor_mode === 'monthly' ? ' / 月1面談（日報監視なし）' : '')
+      + (s.monitor_mode === 'no_progress' ? ' / 進捗管理なし（日報監視なし）' : '')
+      + (s.monitor_mode === 'skip' ? ' / 他の公式LINEが入っているため監視対象外' : '')
       + ' / 担当: ' + esc(s.teacher_name || '未設定')
       + ' / 最終日報: ' + (d.last_report_at ? jstDateTime(d.last_report_at) : '記録なし')
       + '（停止判定は' + s.threshold + '日）</div>';
@@ -468,31 +475,48 @@ export const DASHBOARD_HTML = `<!doctype html>
       }
       if (ins.summary) html += '<div class="box">' + esc(ins.summary) + '</div>';
 
-      var withNums = ins.materials.filter(function (m) { return m.total > 0 && m.done != null; });
+      function isComplete(m) {
+        if (m.total > 0 && m.done != null && Number(m.done) >= Number(m.total)) return true;
+        return false;
+      }
+      var ongoing = ins.materials.filter(function (m) { return !isComplete(m); });
+      var completed = ins.materials.filter(isComplete);
+      var withNums = ongoing.filter(function (m) { return m.total > 0 && m.done != null; });
       if (withNums.length > 0) {
         var sumPct = 0;
         withNums.forEach(function (m) { sumPct += Math.min(m.done / m.total, 1); });
         var overall = Math.round((sumPct / withNums.length) * 100);
         html += '<div class="overall"><span class="pct">' + overall + '%</span>'
-          + '<span class="sub">全体達成率（進捗が数値でわかる教材' + withNums.length + '件の平均）</span></div>';
+          + '<span class="sub">継続中の教材の達成率（数値がある' + withNums.length + '件の平均）</span></div>';
+      } else if (completed.length > 0 && ongoing.length === 0) {
+        html += '<div class="overall"><span class="pct">完了</span><span class="sub">継続中の教材はありません（完了 ' + completed.length + '件）</span></div>';
       }
 
       var today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Tokyo' });
-      ins.materials.forEach(function (m) {
+      function renderMat(m, done) {
         var pct = (m.total > 0 && m.done != null) ? Math.min(Math.round((m.done / m.total) * 100), 100) : null;
-        var over = m.deadline && m.deadline < today && (pct == null || pct < 100);
-        html += '<div class="mat"><div class="mat-head">'
+        var over = !done && m.deadline && m.deadline < today && (pct == null || pct < 100);
+        var h = '<div class="mat' + (done ? ' done' : '') + '"><div class="mat-head">'
           + (m.subject ? '<span class="mat-subject">' + esc(m.subject) + '</span>' : '')
+          + (done ? '<span class="mat-done">完了</span>' : '')
           + '<span class="mat-name">' + esc(m.name) + '</span>'
-          + (pct != null ? '<span class="mat-nums">' + m.done + ' / ' + m.total + esc(m.unit || '') + '（' + pct + '%）</span>' : '')
-          + (m.deadline ? '<span class="mat-deadline' + (over ? ' over' : '') + '">締切 ' + esc(m.deadline) + (over ? ' 超過' : '') + '</span>' : '')
+          + (pct != null ? '<span class="mat-nums">' + m.done + ' / ' + m.total + esc(m.unit || '') + (done ? '' : '（' + pct + '%）') + '</span>' : '')
+          + (m.deadline && !done ? '<span class="mat-deadline' + (over ? ' over' : '') + '">締切 ' + esc(m.deadline) + (over ? ' 超過' : '') + '</span>' : '')
           + '</div>';
-        if (pct != null) {
-          html += '<div class="bar"><div class="fill' + (pct >= 100 ? ' full' : '') + '" style="width:' + pct + '%"></div></div>';
+        if (pct != null && !done) {
+          h += '<div class="bar"><div class="fill" style="width:' + pct + '%"></div></div>';
         }
-        if (m.note) html += '<div class="mat-note">' + esc(m.note) + '</div>';
-        html += '</div>';
-      });
+        if (m.note) h += '<div class="mat-note">' + esc(m.note) + '</div>';
+        return h + '</div>';
+      }
+      if (ongoing.length > 0) {
+        html += '<h2 style="font-size:14px;margin-top:16px">継続中</h2>';
+        ongoing.forEach(function (m) { html += renderMat(m, false); });
+      }
+      if (completed.length > 0) {
+        html += '<h2 style="font-size:14px;margin-top:16px">完了した教材</h2>';
+        completed.forEach(function (m) { html += renderMat(m, true); });
+      }
     }
 
     html += '<h2>模試の結果</h2>';

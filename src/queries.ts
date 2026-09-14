@@ -17,12 +17,38 @@ export interface StudentRow {
   student_group_id: string | null;
   teacher_group_id: string | null;
   teacher_name: string | null;
-  /** daily（既定）= 日報監視する / monthly = 月1面談などで日報・進捗を見ない */
+  /** daily（既定）= 日報監視する / monthly = 月1面談 / no_progress = 進捗管理なし / skip = LINE未参加などで監視しない */
   monitor_mode?: string | null;
 }
 
 export function isMonthlyMonitor(s: { monitor_mode?: string | null }): boolean {
   return s.monitor_mode === "monthly";
+}
+
+/** 日報・進捗の停止判定をしない（月1面談・進捗管理なし・LINE未参加） */
+export function skipsDailyReport(s: { monitor_mode?: string | null }): boolean {
+  return s.monitor_mode === "monthly" || s.monitor_mode === "no_progress" || s.monitor_mode === "skip";
+}
+
+/** ダッシュボード用の短いラベル */
+export function monitorModeBadge(s: { monitor_mode?: string | null }): string | null {
+  if (s.monitor_mode === "monthly") return "月1面談";
+  if (s.monitor_mode === "no_progress") return "進捗管理なし";
+  if (s.monitor_mode === "skip") return "監視対象外";
+  return null;
+}
+
+/** 日報を見ない理由（一覧・分析メモ用） */
+export function skipProgressReason(s: { monitor_mode?: string | null }): string | null {
+  if (s.monitor_mode === "monthly") return "月1面談のため日報監視なし";
+  if (s.monitor_mode === "no_progress") return "進捗管理なしのため日報監視なし";
+  if (s.monitor_mode === "skip") return "他の公式LINEが入っているため監視対象外";
+  return null;
+}
+
+/** 未回答を含めLINE監視をしない（別の公式LINEが既に入っている等） */
+export function skipsAllMonitoring(s: { monitor_mode?: string | null }): boolean {
+  return s.monitor_mode === "skip";
 }
 
 /** 生徒側の発言に絞るWHERE句（display_name参照）とバインド値 */

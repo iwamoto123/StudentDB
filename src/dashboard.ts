@@ -15,7 +15,9 @@ import {
   reportGapThreshold,
   jstDayDiff,
   LESSON_LOOKBACK_DAYS,
-  isMonthlyMonitor,
+  skipsDailyReport,
+  skipProgressReason,
+  skipsAllMonitoring,
 } from "./queries";
 import { DASHBOARD_HTML } from "./dashboard-html";
 import { getInsights } from "./insights";
@@ -183,10 +185,11 @@ async function buildOverview(env: Env, user: DashUser) {
     const last = await lastStudentSideMessage(env, s);
     const gap = last ? jstDayDiff(new Date(last.sent_at), now) : null;
     const threshold = reportGapThreshold(s.status);
-    const monthly = isMonthlyMonitor(s);
-    const stalled = monthly ? false : last ? (gap as number) >= threshold : true;
+    const skipAll = skipsAllMonitoring(s);
+    const skipReport = skipsDailyReport(s);
+    const stalled = skipReport ? false : last ? (gap as number) >= threshold : true;
 
-    const lesson = monthly
+    const lesson = skipReport
       ? { last_lesson_link_at: null as string | null, lesson_share_ok: null as boolean | null }
       : await lessonShareStatus(env, s, now);
 
@@ -195,19 +198,23 @@ async function buildOverview(env: Env, user: DashUser) {
         `SELECT kind, COUNT(*) AS n FROM alerts WHERE student_id = ? AND resolved = 0 GROUP BY kind`
       ).bind(s.id).all<{ kind: string; n: number }>()
     ).results;
-    const visibleAlertKinds = monthly
-      ? openAlertKinds.filter((k) => k.kind !== "no_report" && k.kind !== "weekly_report_missing" && k.kind !== "no_lesson")
-      : openAlertKinds;
+    const visibleAlertKinds = skipAll
+      ? []
+      : skipReport
+        ? openAlertKinds.filter((k) => k.kind !== "no_report" && k.kind !== "weekly_report_missing" && k.kind !== "no_lesson")
+        : openAlertKinds;
     const open = visibleAlertKinds.reduce((sum, k) => sum + k.n, 0);
 
     let state: "順調" | "要観察" | "要対応" = "順調";
-    if (stalled || open > 0) state = "要対応";
-    else if (!monthly && ((gap !== null && gap === threshold - 1) || lesson.lesson_share_ok === false)) state = "要観察";
+    if (!skipAll && (stalled || open > 0)) state = "要対応";
+    else if (!skipReport && ((gap !== null && gap === threshold - 1) || lesson.lesson_share_ok === false)) state = "要観察";
 
     // 状態の理由（一覧・要対応タブで一目でわかるように）
     const reasons: string[] = [];
-    if (monthly) {
-      reasons.push("月1面談のため日報監視なし");
+    if (skipAll) {
+      reasons.push(skipProgressReason(s) ?? "監視対象外");
+    } else if (skipReport) {
+      reasons.push(skipProgressReason(s) ?? "日報監視なし");
     } else if (!last) {
       reasons.push("生徒側の発言記録なし");
     } else if (stalled) {
@@ -228,12 +235,12 @@ async function buildOverview(env: Env, user: DashUser) {
       status: s.status,
       teacher_name: s.teacher_name,
       target_university: s.target_university,
-      monitor_mode: monthly ? "monthly" : "daily",
+      monitor_mode: s.monitor_mode || "daily",
       state,
       state_reasons: reasons,
       threshold,
       last_report_at: last?.sent_at ?? null,
-      report_gap_days: monthly ? null : gap,
+      report_gap_days: skipReport ? null : gap,
       open_alerts: open,
       last_lesson_link_at: lesson.last_lesson_link_at,
       lesson_share_ok: lesson.lesson_share_ok,
@@ -287,7 +294,7 @@ async function buildStudentDetail(env: Env, s: DashStudentRow) {
       status: s.status,
       teacher_name: s.teacher_name,
       target_university: s.target_university,
-      monitor_mode: isMonthlyMonitor(s) ? "monthly" : "daily",
+      monitor_mode: s.monitor_mode || "daily",
       threshold: reportGapThreshold(s.status),
       unmapped: !s.student_group_id,
     },
