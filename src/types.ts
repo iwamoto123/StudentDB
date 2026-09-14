@@ -6,5 +6,6 @@ export interface Env {
   SLACK_WEBHOOK_URL: string;
   ANTHROPIC_API_KEY: string;
   ANTHROPIC_MODEL?: string; // 未設定なら claude-haiku-4-5
+  NOTION_TOKEN: string;      // Notion生徒DBの読み書き（生徒マスタの正本はNotion）
   ANALYSIS_NOTIFY?: string; // "1" のときだけ定時実行が実際に通知する（wrangler.jsonc の vars で切り替え）
 }

@@ -14,6 +14,7 @@ import { runAnalysis, runUnansweredSweep } from "./analyzer";
 import { handleDashboard } from "./dashboard";
 import { extractStudentInsights, refreshAllInsights } from "./insights";
 import { runWeeklyHighlights } from "./highlights";
+import { syncStudentsFromNotion, writeBackReportStatus } from "./notion";
 import type { StudentRow } from "./queries";
 import type { Env } from "./types";
 
@@ -77,11 +78,26 @@ export default {
     const jstDay = new Date(controller.scheduledTime + 9 * 3600_000).getUTCDay();
     const weekly = isMorning && jstDay === 1;
     const notify = env.ANALYSIS_NOTIFY === "1";
+    // 担当講師や在籍状況の正本はNotion。分析の前に流し込んでから判定する
     ctx.waitUntil(
-      runAnalysis(env, { notify, weekly }).then(
-        (r) => console.log(`analysis done: alerts=${r.sent_alerts.length} slack=${r.slack?.ok}`),
-        (e) => console.error("analysis failed", e)
-      )
+      (async () => {
+        if (isMorning) {
+          try {
+            const sync = await syncStudentsFromNotion(env);
+            console.log(`notion sync: updated=${sync.updated.length} unmatched=${sync.unmatched_in_notion.length}`);
+          } catch (e) {
+            console.error("notion sync failed", e);
+          }
+        }
+        const r = await runAnalysis(env, { notify, weekly });
+        console.log(`analysis done: alerts=${r.sent_alerts.length} slack=${r.slack?.ok}`);
+        try {
+          const wb = await writeBackReportStatus(env, r.students.map(toReportStatusInput));
+          console.log(`notion writeback: written=${wb.written.length} unchanged=${wb.unchanged}`);
+        } catch (e) {
+          console.error("notion writeback failed", e);
+        }
+      })().catch((e) => console.error("scheduled run failed", e))
     );
     if (isMorning) {
       ctx.waitUntil(
@@ -325,8 +341,8 @@ async function handleAdmin(request: Request, env: Env, url: URL): Promise<Respon
     if (b.status && !["trial", "enrolled", "inactive"].includes(b.status)) {
       return json({ error: "status must be trial|enrolled|inactive" }, 400);
     }
-    if (b.monitor_mode && !["daily", "monthly"].includes(b.monitor_mode)) {
-      return json({ error: "monitor_mode must be daily|monthly" }, 400);
+    if (b.monitor_mode && !["daily", "monthly", "no_progress", "skip"].includes(b.monitor_mode)) {
+      return json({ error: "monitor_mode must be daily|monthly|no_progress|skip" }, 400);
     }
 
     // 紐付け先グループの存在チェック（FK違反を先にわかりやすいエラーで返す）
@@ -343,22 +359,31 @@ async function handleAdmin(request: Request, env: Env, url: URL): Promise<Respon
       : await env.DB.prepare(`SELECT id FROM students WHERE name = ? AND business = ?`).bind(b.name, b.business).first<{ id: number }>();
 
     if (existing) {
+      // 名前・在籍状況・担当講師・志望校・体験開始日の正本はNotion。
+      // ここで受け取っても次の同期で上書きされるため、黙って捨てずに ignored として返す。
+      const ignored = (["name", "status", "teacher_name", "target_university", "trial_start_date"] as const)
+        .filter((k) => b[k] != null);
+
       await env.DB.prepare(
-        `UPDATE students SET name = ?, business = ?,
-           status = COALESCE(?, status),
+        `UPDATE students SET
+           business = ?,
            student_group_id = COALESCE(?, student_group_id),
            teacher_group_id = COALESCE(?, teacher_group_id),
-           teacher_name = COALESCE(?, teacher_name),
-           trial_start_date = COALESCE(?, trial_start_date),
            notion_page_id = COALESCE(?, notion_page_id),
-           target_university = COALESCE(?, target_university),
            monitor_mode = COALESCE(?, monitor_mode),
            updated_at = datetime('now')
          WHERE id = ?`
-      ).bind(b.name, b.business, b.status ?? null, b.student_group_id ?? null, b.teacher_group_id ?? null,
-             b.teacher_name ?? null, b.trial_start_date ?? null, b.notion_page_id ?? null,
-             b.target_university ?? null, b.monitor_mode ?? null, existing.id).run();
-      return json({ ok: true, id: existing.id, action: "updated" });
+      ).bind(b.business, b.student_group_id ?? null, b.teacher_group_id ?? null,
+             b.notion_page_id ?? null, b.monitor_mode ?? null, existing.id).run();
+
+      return json({
+        ok: true,
+        id: existing.id,
+        action: "updated",
+        ...(ignored.length
+          ? { ignored, note: "この項目の正本はNotionの生徒DBです。Notionで直してから /admin/notion-sync を実行してください" }
+          : {}),
+      });
     }
 
     const r = await env.DB.prepare(
@@ -436,6 +461,19 @@ async function handleAdmin(request: Request, env: Env, url: URL): Promise<Respon
   }
 
   // 分析の手動実行。デフォルトはdry-run。notify=1 で実際に通知。sweep=1 は未回答質問だけ
+  // Notion → D1（生徒マスタの流し込み）。?dry=1 で差分だけ見る
+  if (request.method === "POST" && url.pathname === "/admin/notion-sync") {
+    const report = await syncStudentsFromNotion(env);
+    return json(report);
+  }
+
+  // D1 → Notion（日報の状況の書き戻し）。分析を回してから書く
+  if (request.method === "POST" && url.pathname === "/admin/notion-writeback") {
+    const r = await runAnalysis(env, { notify: false, weekly: false });
+    const report = await writeBackReportStatus(env, r.students.map(toReportStatusInput));
+    return json(report);
+  }
+
   if (request.method === "POST" && url.pathname === "/admin/run-analysis") {
     const notify = url.searchParams.get("notify") === "1";
     if (url.searchParams.get("sweep") === "1") {
@@ -488,4 +526,25 @@ function json(data: unknown, status = 200): Response {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+/** 分析結果から、Notionへ書き戻す分だけを取り出す */
+function toReportStatusInput(a: {
+  student_id: number;
+  name: string;
+  last_student_message_at: string | null;
+  report_gap_days: number | null;
+  report_stalled: boolean;
+  unanswered: unknown[];
+  skip_progress: boolean;
+}) {
+  return {
+    student_id: a.student_id,
+    name: a.name,
+    last_student_message_at: a.last_student_message_at,
+    report_gap_days: a.report_gap_days,
+    report_stalled: a.report_stalled,
+    unanswered_count: a.unanswered.length,
+    skip_progress: a.skip_progress,
+  };
 }

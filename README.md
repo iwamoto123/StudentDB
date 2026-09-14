@@ -15,6 +15,39 @@
 | 週次チェック | 月曜朝に講師の週次報告の提出状況を確認 |
 | ダッシュボード | `/dashboard`。生徒一覧（状態別サマリーカード・検索・フィルタ）、要対応タブ（←→で1人ずつ確認）、日報カレンダー、直近の会話、アラート管理（チェックで自動保存） |
 
+## 生徒マスタの正本はNotion
+
+担当講師・在籍状況・志望校・体験開始日は **Notionの生徒DBが正本**。D1の `students` は
+「LINEグループと生徒の対応表」と、Notionから流し込んだ写しを持つだけにする。
+
+| 向き | 何を | いつ |
+|------|------|------|
+| Notion → D1 | 名前・事業・在籍状況・担当講師・志望校・体験開始日 | 朝の定時（分析の前）／`POST /admin/notion-sync` |
+| D1 → Notion | `日報の状況`（テキスト）・`日報最終提出日`（日付） | 分析のあと毎回／`POST /admin/notion-writeback` |
+
+書き戻した2列を社員向けのPLダッシュボード `/students` が読む。あちらはNotionだけを見るので、
+LINEの実装を持ち込まずに日報の停滞まで1画面に出せる。
+
+`POST /admin/students` で 名前・ステータス・担当講師・志望校・体験開始日 を送っても、
+既存の生徒に対しては**無視して `ignored` で返す**（次の同期で上書きされるため）。
+これらはNotionで直してから `/admin/notion-sync` を実行する。
+
+D1にしか無い項目は `student_group_id` / `teacher_group_id` / `monitor_mode` / `notion_page_id` の4つ。
+
+### 追加が必要な設定
+
+```bash
+npx wrangler secret put NOTION_TOKEN        # 生徒DB2つ＋講師DB3つに接続したインテグレーション
+npx wrangler d1 execute line-monitor --remote --file=migrations/0005-notion-sync.sql
+npx wrangler deploy
+```
+
+Notion側では、そのインテグレーションを次のDBに接続しておく（`…` → 接続）。
+接続していない講師DBがあると、その講師の名前だけ空で同期される。
+
+- R8 面談・体験生徒 / R8 生徒
+- R8 オンライン講師 / R8 ローカルメディ講師 / R8 英検コース講師
+
 ## 構成
 
 ```
@@ -26,6 +59,7 @@ src/
   send.ts           LINE送信（講師グループ限定ガード）・Slack送信
   dashboard.ts      ダッシュボードAPI（アクセスキー認証）
   dashboard-html.ts ダッシュボード画面（単一HTML）
+  notion.ts         Notionとの同期（生徒マスタの取り込み・日報の状況の書き戻し）
   types.ts          Env型
 schema.sql          D1スキーマ
 ```
@@ -54,6 +88,8 @@ npx wrangler d1 execute line-monitor --remote --file=schema.sql   # スキーマ
 | `GET/POST /admin/students` | 生徒の登録・更新（Notionページ・グループ紐付け） |
 | `POST /admin/dashboard-users` | ダッシュボード利用者の発行 |
 | `POST /admin/run-analysis` | 分析の手動実行（`{"notify":false}` でドライラン） |
+| `POST /admin/notion-sync` | Notion → D1 の生徒マスタ同期 |
+| `POST /admin/notion-writeback` | 分析を回して日報の状況をNotionへ書き戻す |
 
 ## メモ
 

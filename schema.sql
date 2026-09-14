@@ -52,6 +52,9 @@ CREATE TABLE IF NOT EXISTS students (
   notion_page_id TEXT,
   target_university TEXT, -- 志望大学学部学科（Notionから同期）
   monitor_mode TEXT NOT NULL DEFAULT 'daily' CHECK (monitor_mode IN ('daily', 'monthly', 'no_progress', 'skip')), -- monthlyは月1面談 / no_progressは進捗管理なし / skipはLINE未参加
+  notion_synced_at TEXT,           -- Notionから流し込んだ時刻
+  last_report_status_text TEXT,    -- 前回Notionへ書き戻した「日報の状況」。差分がなければ投げない
+  last_report_date TEXT,           -- 前回Notionへ書き戻した「日報最終提出日」
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
