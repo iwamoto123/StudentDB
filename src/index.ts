@@ -460,7 +460,6 @@ async function handleAdmin(request: Request, env: Env, url: URL): Promise<Respon
     return json(await runWeeklyHighlights(env, { notify }));
   }
 
-  // 分析の手動実行。デフォルトはdry-run。notify=1 で実際に通知。sweep=1 は未回答質問だけ
   // Notion → D1（生徒マスタの流し込み）。?dry=1 で差分だけ見る
   if (request.method === "POST" && url.pathname === "/admin/notion-sync") {
     const report = await syncStudentsFromNotion(env);
@@ -474,6 +473,7 @@ async function handleAdmin(request: Request, env: Env, url: URL): Promise<Respon
     return json(report);
   }
 
+  // 分析の手動実行。デフォルトはdry-run。notify=1 で実際に通知。sweep=1 は未回答の質問・日報未返信だけ
   if (request.method === "POST" && url.pathname === "/admin/run-analysis") {
     const notify = url.searchParams.get("notify") === "1";
     if (url.searchParams.get("sweep") === "1") {
@@ -535,16 +535,18 @@ function toReportStatusInput(a: {
   last_student_message_at: string | null;
   report_gap_days: number | null;
   report_stalled: boolean;
-  unanswered: unknown[];
+  unanswered: { kind?: "question" | "daily_report" }[];
   skip_progress: boolean;
 }) {
+  const reports = a.unanswered.filter((u) => u.kind === "daily_report").length;
   return {
     student_id: a.student_id,
     name: a.name,
     last_student_message_at: a.last_student_message_at,
     report_gap_days: a.report_gap_days,
     report_stalled: a.report_stalled,
-    unanswered_count: a.unanswered.length,
+    unanswered_count: a.unanswered.length - reports,
+    unanswered_report_count: reports,
     skip_progress: a.skip_progress,
   };
 }

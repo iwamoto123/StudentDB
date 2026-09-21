@@ -148,6 +148,7 @@ export const DASHBOARD_HTML = `<!doctype html>
     no_report: '日報停止',
     unanswered_by_student: '生徒側が未返信',
     unanswered_by_teacher: '未回答の質問',
+    unanswered_report: '日報への未返信',
     no_lesson: '個別指導未実施',
     weekly_report_missing: '週次報告未提出'
   };

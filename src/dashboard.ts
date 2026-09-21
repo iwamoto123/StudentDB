@@ -39,6 +39,7 @@ const ALERT_KIND_LABELS: Record<string, string> = {
   no_report: "日報停止アラート",
   unanswered_by_student: "生徒側の未返信",
   unanswered_by_teacher: "未回答の質問",
+  unanswered_report: "日報への未返信",
   no_lesson: "個別指導未実施",
   weekly_report_missing: "週次報告未提出",
 };
@@ -201,7 +202,7 @@ async function buildOverview(env: Env, user: DashUser) {
     const visibleAlertKinds = skipAll
       ? []
       : skipReport
-        ? openAlertKinds.filter((k) => k.kind !== "no_report" && k.kind !== "weekly_report_missing" && k.kind !== "no_lesson")
+        ? openAlertKinds.filter((k) => k.kind !== "no_report" && k.kind !== "weekly_report_missing" && k.kind !== "no_lesson" && k.kind !== "unanswered_report")
         : openAlertKinds;
     const open = visibleAlertKinds.reduce((sum, k) => sum + k.n, 0);
 

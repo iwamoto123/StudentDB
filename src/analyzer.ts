@@ -2,7 +2,7 @@
  * 定時分析ジョブ（フェーズ2: F2-1〜F2-5）
  *
  * - F2-1 日報チェック: SQLで生徒側の最終発言日を判定（体験中2日 / 塾生3日で検出）
- * - F2-2 未回答検出: 直近24時間の会話をClaudeが読み、両方向の未回答質問を検出（24時間以内の回答を徹底するため）
+ * - F2-2 未回答検出: 直近24時間の会話をClaudeが読み、未回答の質問（双方向）と日報への未返信を検出
  * - F2-3 全体ダイジェスト: Slackへ全生徒サマリを送信
  * - F2-4 週次報告チェック: 月曜朝のみ、講師グループの【生徒名】投稿を照合
  * - F2-5 個別指導後の共有チェック: 指導リンク（Zoom/Google Meet）の投稿を「実施」とみなし、
@@ -33,9 +33,13 @@ const UNANSWERED_WINDOW_HOURS = 24;
 const UNANSWERED_SWEEP_WINDOW_HOURS = 24;
 // 生徒・保護者の質問に講師が答えていないとみなす時間（時）
 const STUDENT_QUESTION_STALE_HOURS = 12;
+// 日報に講師・スタッフが返していないとみなす時間（時）
+const DAILY_REPORT_STALE_HOURS = 14;
 
 export interface UnansweredItem {
   direction: "student_to_staff" | "staff_to_student";
+  /** question=質問・依頼 / daily_report=日報・進捗報告。省略時は question */
+  kind?: "question" | "daily_report";
   asked_by: string;
   asked_at: string; // "MM/DD HH:mm"（JST）
   question: string;
@@ -113,9 +117,14 @@ export async function runAnalysis(
         await notifyOnce(env, student, "unanswered_by_student", text, sentAlerts);
       }
 
-      const byTeacher = a.unanswered.filter((u) => u.direction === "student_to_staff");
+      const byTeacher = a.unanswered.filter((u) => u.direction === "student_to_staff" && unansweredKind(u) === "question");
       if (byTeacher.length > 0) {
         await notifyUnansweredByTeacher(env, student, byTeacher, sentAlerts);
+      }
+
+      const unansweredReports = a.unanswered.filter((u) => unansweredKind(u) === "daily_report");
+      if (unansweredReports.length > 0) {
+        await notifyUnansweredReport(env, student, unansweredReports, sentAlerts);
       }
     }
   }
@@ -137,7 +146,7 @@ export async function runAnalysis(
 }
 
 /**
- * 毎時の未回答チェック。生徒・保護者の質問に1時間以上答えていない場合だけ講師グループへ送る。
+ * 未回答の質問・日報未返信だけを拾って講師グループへ送る。
  * Slackダイジェストは送らない（朝晩の定時に任せる）。
  */
 export async function runUnansweredSweep(
@@ -170,12 +179,18 @@ export async function runUnansweredSweep(
     ).results;
     if (recent.length === 0) continue;
 
-    const detected = await detectUnanswered(env, s, recent, now);
-    const byTeacher = (detected ?? []).filter((u) => u.direction === "student_to_staff");
-    if (byTeacher.length === 0) continue;
+    const detected = normalizeUnanswered(await detectUnanswered(env, s, recent, now), skipsDailyReport(s), now);
+    const byTeacher = detected.filter((u) => u.direction === "student_to_staff" && unansweredKind(u) === "question");
+    const unansweredReports = detected.filter((u) => unansweredKind(u) === "daily_report");
+    if (byTeacher.length === 0 && unansweredReports.length === 0) continue;
     unanswered++;
     if (opts.notify && s.teacher_group_id) {
-      await notifyUnansweredByTeacher(env, s, byTeacher, sentAlerts);
+      if (byTeacher.length > 0) {
+        await notifyUnansweredByTeacher(env, s, byTeacher, sentAlerts);
+      }
+      if (unansweredReports.length > 0) {
+        await notifyUnansweredReport(env, s, unansweredReports, sentAlerts);
+      }
     }
   }
 
@@ -247,7 +262,7 @@ async function analyzeStudent(env: Env, s: StudentRow, now: Date): Promise<Stude
       a.notes.push("AI分析なし（APIキー未設定またはエラー）");
     } else {
       a.ai_analyzed = true;
-      a.unanswered = detected;
+      a.unanswered = normalizeUnanswered(detected, skipsDailyReport(s), now);
     }
   }
 
@@ -276,15 +291,25 @@ async function detectUnanswered(
 参加者: 生徒本人・保護者・担当講師（${s.teacher_name ?? "不明"}）・塾スタッフ（岩本・酒井）。
 現在時刻: ${jstShort(now.toISOString(), true)}
 
-未回答の質問・依頼を検出してください。
+未回答を検出してください。次の2種類です。
+
+1. 質問・依頼（kind="question"）
 - direction="student_to_staff": 生徒・保護者からの質問・依頼・確認待ちに、講師・スタッフが${STUDENT_QUESTION_STALE_HOURS}時間以上応答していない
 - direction="staff_to_student": 講師・スタッフからの質問や依頼に、生徒・保護者が12時間以上応答していない
-- 挨拶・報告・スタンプなど応答不要のものは含めない
-- 質問の後に話題が変わっていても、実質的に答えられていれば未回答としない
+
+2. 日報への未返信（kind="daily_report"。directionは必ず"student_to_staff"）
+- 生徒の進捗報告・日報（今日やったこと、明日やること、勉強時間、教材の進み、箇条書きの学習報告）に、講師・スタッフが${DAILY_REPORT_STALE_HOURS}時間以上、テキストでもスタンプでも返していない
+- 保護者だけが反応して講師・スタッフが何も言っていない場合は未返信とする
+- 講師・スタッフが日報の後に一度でも発言していれば、それより前の日報は返信ありとみなす
+- 未返信の日報が複数あっても、最新の1件だけ出す
+
+含めないもの:
+- 挨拶、スタンプだけ、短い雑談、日程の事務連絡など、日報でも質問でもないもの
+- 質問や日報の後に講師・スタッフが実質的に返していれば未回答としない（日報は一言・スタンプでも返信あり）
 - 判断に迷うものは含めない（誤検知より見逃しのほうがまし）
 
 次のJSONのみを出力してください（未回答がなければ空配列）:
-{"unanswered":[{"direction":"student_to_staff","asked_by":"表示名","asked_at":"MM/DD HH:mm","question":"質問の要約(40字以内)"}]}
+{"unanswered":[{"direction":"student_to_staff","kind":"question","asked_by":"表示名","asked_at":"MM/DD HH:mm","question":"要約(40字以内)"}]}
 
 会話:
 ${lines}`;
@@ -299,7 +324,7 @@ ${lines}`;
       },
       body: JSON.stringify({
         model: env.ANTHROPIC_MODEL || DEFAULT_MODEL,
-        max_tokens: 1000,
+        max_tokens: 1200,
         messages: [{ role: "user", content: prompt }],
       }),
     });
@@ -312,9 +337,7 @@ ${lines}`;
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) return [];
     const parsed = JSON.parse(jsonMatch[0]) as { unanswered?: UnansweredItem[] };
-    return (parsed.unanswered ?? []).filter(
-      (u) => u.direction === "student_to_staff" || u.direction === "staff_to_student"
-    );
+    return parsed.unanswered ?? [];
   } catch (e) {
     console.error("detectUnanswered failed", e);
     return null;
@@ -364,6 +387,19 @@ async function notifyUnansweredByTeacher(
   await notifyOnce(env, student, "unanswered_by_teacher", text, sentAlerts);
 }
 
+async function notifyUnansweredReport(
+  env: Env,
+  student: StudentRow,
+  items: UnansweredItem[],
+  sentAlerts: AnalysisResult["sent_alerts"]
+): Promise<void> {
+  const lines = items.map((u) => `・${u.asked_at} ${u.asked_by}さん「${u.question}」`).join("\n");
+  const text =
+    `【対応依頼】${student.name}さんの日報に返信がありません。\n${lines}\n` +
+    `グループへの一言返信をお願いします。\n\n※学習進捗サポートの自動通知です`;
+  await notifyOnce(env, student, "unanswered_report", text, sentAlerts);
+}
+
 async function notifyOnce(
   env: Env,
   student: StudentRow,
@@ -403,14 +439,15 @@ function buildDigest(
   weekly: boolean
 ): string {
   const stalled = analyses.filter((a) => a.report_stalled);
-  const withUnanswered = analyses.filter((a) => a.unanswered.length > 0);
+  const withQuestions = analyses.filter((a) => a.unanswered.some((u) => unansweredKind(u) === "question"));
+  const withUnansweredReports = analyses.filter((a) => a.unanswered.some((u) => unansweredKind(u) === "daily_report"));
   const noShare = analyses.filter((a) => !a.skip_progress && a.lesson_share_ok === false);
   const noLessonLink = analyses.filter((a) => !a.skip_progress && a.last_lesson_link_at === null);
   const ok = analyses.filter((a) => !a.report_stalled && a.unanswered.length === 0);
 
   const L: string[] = [];
   L.push(`LINE進捗ダイジェスト ${jstShort(now.toISOString(), true)}`);
-  L.push(`対象${analyses.length}名: 順調${ok.length} / 日報停止${stalled.length} / 未回答の質問${withUnanswered.length}`);
+  L.push(`対象${analyses.length}名: 順調${ok.length} / 日報停止${stalled.length} / 未回答の質問${withQuestions.length} / 日報未返信${withUnansweredReports.length}`);
 
   L.push("");
   L.push("■ 日報停止");
@@ -424,11 +461,21 @@ function buildDigest(
 
   L.push("");
   L.push("■ 未回答の質問");
-  if (withUnanswered.length === 0) L.push("・なし");
-  for (const a of withUnanswered) {
-    for (const u of a.unanswered) {
+  if (withQuestions.length === 0) L.push("・なし");
+  for (const a of withQuestions) {
+    for (const u of a.unanswered.filter((x) => unansweredKind(x) === "question")) {
       const dir = u.direction === "student_to_staff" ? "講師側が未回答" : "生徒側が未返信";
       L.push(`・${a.name}さん: ${u.asked_at} ${u.asked_by}「${u.question}」（${dir}）`);
+    }
+  }
+
+  L.push("");
+  L.push("■ 日報への未返信");
+  if (withUnansweredReports.length === 0) L.push("・なし");
+  for (const a of withUnansweredReports) {
+    for (const u of a.unanswered.filter((x) => unansweredKind(x) === "daily_report")) {
+      const alerted = sentAlerts.some((x) => x.student === a.name && x.kind === "unanswered_report" && x.ok);
+      L.push(`・${a.name}さん: ${u.asked_at} ${u.asked_by}「${u.question}」（担当 ${a.teacher_name ?? "未設定"}）${alerted ? "→ 講師グループへ依頼済み" : ""}`);
     }
   }
 
@@ -459,6 +506,51 @@ function buildDigest(
   }
 
   return L.join("\n");
+}
+
+function unansweredKind(u: UnansweredItem): "question" | "daily_report" {
+  return u.kind === "daily_report" ? "daily_report" : "question";
+}
+
+function staleHours(u: UnansweredItem): number {
+  return unansweredKind(u) === "daily_report" ? DAILY_REPORT_STALE_HOURS : STUDENT_QUESTION_STALE_HOURS;
+}
+
+/** Claudeが出した "MM/DD HH:mm"（JST）をDateにする。年は現在時刻から推定 */
+function parseAskedAtJst(askedAt: string, now: Date): Date | null {
+  const m = askedAt.trim().match(/^(\d{1,2})\/(\d{1,2})\s+(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  const jstNow = new Date(now.getTime() + JST_MS);
+  const year = jstNow.getUTCFullYear();
+  const month = Number(m[1]) - 1;
+  const day = Number(m[2]);
+  const hour = Number(m[3]);
+  const minute = Number(m[4]);
+  let utcMs = Date.UTC(year, month, day, hour, minute) - JST_MS;
+  // 未来に寄りすぎていれば前年（年末年始）
+  if (utcMs - now.getTime() > 12 * 3600_000) {
+    utcMs = Date.UTC(year - 1, month, day, hour, minute) - JST_MS;
+  }
+  return new Date(utcMs);
+}
+
+function isStaleEnough(u: UnansweredItem, now: Date): boolean {
+  const asked = parseAskedAtJst(u.asked_at, now);
+  if (!asked) return true;
+  return now.getTime() - asked.getTime() >= staleHours(u) * 3600_000;
+}
+
+/** Claudeの出力を正規化する。日報監視なしの生徒は日報未返信を落とす */
+function normalizeUnanswered(items: UnansweredItem[] | null, skipDailyReport: boolean, now: Date): UnansweredItem[] {
+  if (!items) return [];
+  return items
+    .filter((u) => u.direction === "student_to_staff" || u.direction === "staff_to_student")
+    .map((u) => ({
+      ...u,
+      kind: u.direction === "staff_to_student" ? "question" : unansweredKind(u),
+    }))
+    .filter((u) => !(skipDailyReport && unansweredKind(u) === "daily_report"))
+    .filter((u) => isStaleEnough(u, now));
 }
 
 // ---------- 日時ユーティリティ ----------

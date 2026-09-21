@@ -127,6 +127,9 @@ function normalizeName(name: string): string {
   return name.replace(/[\s　]/g, "");
 }
 
+/** 短期プログラムの指導中を表すステータス。2026-09に「体験中」から分離した */
+const PROGRAM_STATUSES = ["9月のプログラム実施中", "残り100日プログラム実施中"];
+
 /**
  * 在籍の段階。結果に入力があれば結果がステータスより正しい
  * （CLAUDE.md「ステータスと結果の読み方」）。
@@ -134,7 +137,9 @@ function normalizeName(name: string): string {
 function toStatus(statusName: string | null, resultName: string | null): NotionStudent["status"] {
   if (resultName) return resultName === "体験後入塾" ? "enrolled" : "inactive";
   if (statusName === "塾生") return "enrolled";
-  if (statusName === "体験中") return "trial";
+  // 短期プログラム（9月・共テ残り100日）の指導中も体験中と同じ扱い。
+  // 日報の停滞しきい値（2日）と担当生徒の抽出をここで決めている。
+  if (statusName === "体験中" || PROGRAM_STATUSES.includes(statusName ?? "")) return "trial";
   return "inactive";
 }
 
@@ -304,6 +309,7 @@ export interface ReportStatusInput {
   report_gap_days: number | null;
   report_stalled: boolean;
   unanswered_count: number;
+  unanswered_report_count?: number;
   skip_progress: boolean;
 }
 
@@ -317,6 +323,7 @@ export function buildReportStatusText(a: ReportStatusInput, lastDate: string | n
   else if (a.report_gap_days !== null) parts.push(`日報は${a.report_gap_days}日空いています`);
   else parts.push("日報の記録なし");
   if (a.unanswered_count > 0) parts.push(`未回答の質問 ${a.unanswered_count}件`);
+  if ((a.unanswered_report_count ?? 0) > 0) parts.push(`日報への未返信 ${a.unanswered_report_count}件`);
   return `${parts.join("／")}（${last}）`;
 }
 
