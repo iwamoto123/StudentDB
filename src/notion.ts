@@ -127,15 +127,12 @@ function normalizeName(name: string): string {
   return name.replace(/[\s　]/g, "");
 }
 
-/** 短期プログラムの指導中を表すステータス。2026-09に「体験中」から分離した */
-const PROGRAM_STATUSES = ["9月のプログラム実施中", "残り100日プログラム実施中"];
+/** 短期プログラムの指導中と継続確認待ち。2026-09に「体験中」から分離し、2026-10に継続確認中を足した */
+const PROGRAM_STATUSES = ["9月のプログラム実施中", "残り100日プログラム実施中", "継続確認中"];
 
-/**
- * 在籍の段階。結果に入力があれば結果がステータスより正しい
- * （CLAUDE.md「ステータスと結果の読み方」）。
- */
-function toStatus(statusName: string | null, resultName: string | null): NotionStudent["status"] {
-  if (resultName) return resultName === "体験後入塾" ? "enrolled" : "inactive";
+/** 在籍の段階。Notionのステータス1列から決める */
+function toStatus(statusName: string | null): NotionStudent["status"] {
+  // ステータス1列で判定する（2026-10-07にNotionの「結果」「継続確認」を統合して廃止）
   if (statusName === "塾生") return "enrolled";
   // 短期プログラム（9月・共テ残り100日）の指導中も体験中と同じ扱い。
   // 日報の停滞しきい値（2日）と担当生徒の抽出をここで決めている。
@@ -180,7 +177,7 @@ function toNotionStudent(page: Json, teachers: Map<string, string>): NotionStude
     pageId: dashless(page.id as string),
     name,
     business: courses.some((c) => c.includes("ローカルメディ")) ? "localmedi" : "shiratani",
-    status: toStatus(selectName(props["ステータス"]), selectName(props["結果"])),
+    status: toStatus(selectName(props["ステータス"])),
     teacherName: teacherNames.length ? Array.from(new Set(teacherNames)).join("・") : null,
     targetUniversity: plain(props["志望大学学部学科"]).trim() || null,
     trialStartDate: dateStart(props["体験開始日"]),
